@@ -3,9 +3,10 @@
 # remnainstall / nodeKeeper Installer
 # Automated, Hardened, Multi-Mode Remnawave Node Deployment & Management Suite
 # ==============================================================================
-set -uo pipefail
+{
+set -o pipefail
 
-INSTALLER_VERSION="2.0.0"
+INSTALLER_VERSION="2.0.1"
 NK_DIR="/opt/nodekeeper"
 NK_ENV="${NK_DIR}/nodekeeper.env"
 NK_LOG_DIR="${NK_DIR}/logs"
@@ -19,7 +20,9 @@ C_GREEN="\033[1;32m"
 C_YELLOW="\033[1;33m"
 C_RED="\033[1;31m"
 C_CYAN="\033[1;36m"
+C_BLUE="\033[1;34m"
 C_MAGENTA="\033[1;35m"
+C_GRAY="\033[0;90m"
 
 info()  { echo -e "${C_CYAN}[INFO]${C_RESET} $*"; }
 ok()    { echo -e "${C_GREEN}[OK]${C_RESET} $*"; }
@@ -682,9 +685,9 @@ EOF
 # ==============================================================================
 # nodeKeeper — Remnawave Node & Server Control CLI
 # ==============================================================================
-set -uo pipefail
+set -o pipefail
 
-NK_VERSION="1.0.0"
+NK_VERSION="1.0.1"
 NK_DIR="/opt/nodekeeper"
 NK_ENV="${NK_DIR}/nodekeeper.env"
 NK_LOG_DIR="${NK_DIR}/logs"
@@ -698,6 +701,9 @@ C_GREEN="\033[1;32m"
 C_YELLOW="\033[1;33m"
 C_RED="\033[1;31m"
 C_CYAN="\033[1;36m"
+C_BLUE="\033[1;34m"
+C_MAGENTA="\033[1;35m"
+C_GRAY="\033[0;90m"
 
 info()  { echo -e "${C_CYAN}[INFO]${C_RESET} $*"; }
 ok()    { echo -e "${C_GREEN}[OK]${C_RESET} $*"; }
@@ -1767,3 +1773,4 @@ main() {
 }
 
 main "$@"
+}

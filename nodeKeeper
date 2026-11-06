@@ -2,9 +2,9 @@
 # ==============================================================================
 # nodeKeeper — Remnawave Node & Server Control CLI
 # ==============================================================================
-set -uo pipefail
+set -o pipefail
 
-NK_VERSION="1.0.0"
+NK_VERSION="1.0.1"
 NK_DIR="/opt/nodekeeper"
 NK_ENV="${NK_DIR}/nodekeeper.env"
 NK_LOG_DIR="${NK_DIR}/logs"
