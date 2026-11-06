@@ -1,0 +1,36 @@
+{
+    admin off
+    servers unix/{$CADDY_SOCKET_PATH} {
+        listener_wrappers {
+            proxy_protocol
+            tls
+        }
+    }
+    auto_https disable_redirects
+}
+
+http://{$SELF_STEAL_DOMAIN} {
+    bind 0.0.0.0
+    redir https://{$SELF_STEAL_DOMAIN}{uri} permanent
+}
+
+# Primary HTTPS block for browsers / REALITY fallback (TCP via unix socket)
+https://{$SELF_STEAL_DOMAIN} {
+    bind unix/{$CADDY_SOCKET_PATH}
+    root * /var/www/html
+    try_files {path} /index.html
+    file_server
+}
+
+# Local HTTP masking block (e.g. for Hysteria / local fallback)
+http://127.0.0.1:8080 {
+    bind 127.0.0.1
+    root * /var/www/html
+    try_files {path} /index.html
+    file_server
+}
+
+:80 {
+    bind 0.0.0.0
+    respond 204
+}

@@ -1,0 +1,60 @@
+# ==============================================================================
+# nodeKeeper / remnainstall — Configuration File Example
+# ==============================================================================
+# Usage:
+#   bash install.sh --config /path/to/nodekeeper.conf --yes
+#   or via curl:
+#   curl -fsSL https://raw.githubusercontent.com/onehundredtwentyeight/nodeKeeper_scipt/main/install.sh | bash -s -- --config /path/to/nodekeeper.conf --yes
+# ==============================================================================
+
+# 1. Node Identification
+# Full hostname to set on the server (no forced prefix)
+NODE_HOSTNAME="kvn-nl-01"
+
+# 2. Installation Mode
+# Options:
+#   basic            - Remnanode only (no reverse proxy / Caddy)
+#   selfsteal-single - Remnanode + Caddy (HTTP-01 / standard single-server per domain)
+#   selfsteal-multi  - Remnanode + Caddy built with Cloudflare DNS-01 plugin (multi-server domain)
+INSTALL_MODE="selfsteal-multi"
+
+# 3. Domain & Cloudflare Settings (required for selfsteal-single / selfsteal-multi)
+SELF_STEAL_DOMAIN="node.example.com"
+# Required only for INSTALL_MODE="selfsteal-multi" (Zone.DNS:Edit permission)
+CLOUDFLARE_API_TOKEN="cfut_your_cloudflare_api_token_here"
+
+# 4. Remnawave Node Connection Settings
+# IPv4 address of your Remnawave Panel (whitelisted in UFW for NODE_PORT)
+PANEL_IP="203.0.113.10"
+# Port listened by remnanode for panel control
+NODE_PORT="2222"
+# Base64 SECRET_KEY copied from the Remnawave Panel
+SECRET_KEY="eyJub2RlQ2VydFBlbSI6Ii..."
+
+# 5. System Hardening & User Credentials
+# New sudo + docker user to create
+ADMIN_USER="node"
+# Leave empty to auto-generate a strong 20-char random password
+ADMIN_PASSWORD=""
+# SSH Public Key (ed25519 / rsa). Leave empty to copy from /root/.ssh/authorized_keys
+SSH_PUBLIC_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host"
+# SSH Port (leave empty to auto-detect current sshd port, default 22)
+SSH_PORT="22"
+
+# 6. Cloudflare WARP
+# Automatically install native WireGuard WARP interface (Table = off)
+INSTALL_WARP="true"
+
+# 7. Pre-flight Diagnostics
+# Run ipregion and censorcheck before applying changes
+RUN_IP_CHECKS="true"
+
+# 8. Maintenance & Auto-Update Schedule
+MAINT_ENABLED="true"
+# Minimum and maximum days between randomized maintenance runs (e.g. 5 to 10 days)
+MAINT_MIN_DAYS="5"
+MAINT_MAX_DAYS="10"
+# Enable logging of maintenance and censorship tests to /opt/nodekeeper/logs
+MAINT_LOGGING="true"
+# Optional custom shell command to execute during maintenance before reboot
+MAINT_EXTRA_CMD=""
