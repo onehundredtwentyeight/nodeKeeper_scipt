@@ -7,7 +7,7 @@
 {
 set -o pipefail
 
-INSTALLER_VERSION="1.1"
+INSTALLER_VERSION="1.1.1"
 NK_REPO_RAW_URL="${NK_REPO_RAW_URL:-https://raw.githubusercontent.com/onehundredtwentyeight/nodeKeeper_scipt/main}"
 NK_DIR="/opt/nodekeeper"
 NK_ENV="${NK_DIR}/nodekeeper.env"
@@ -416,7 +416,7 @@ write_nodekeeper_binary() {
 # ==============================================================================
 set -o pipefail
 
-NK_VERSION="1.1"
+NK_VERSION="1.1.1"
 NK_REPO_RAW_URL_DEFAULT="https://raw.githubusercontent.com/onehundredtwentyeight/nodeKeeper_scipt/main"
 NK_DIR="/opt/nodekeeper"
 NK_ENV="${NK_DIR}/nodekeeper.env"
@@ -587,6 +587,39 @@ fix_service_dir_permissions() {
         [ -f "${XUI_DIR}/docker-compose.yml" ] && chmod 600 "${XUI_DIR}/docker-compose.yml"
         ok "Permissions on ${XUI_DIR} updated for user '${target_user}'."
     fi
+}
+
+configure_passwordless_sudo() {
+    local target_user
+    target_user=$(resolve_admin_user || true)
+    if [ -z "$target_user" ]; then
+        warn "Could not resolve a non-root admin user; skipping passwordless sudo configuration."
+        return 0
+    fi
+
+    local safe_user="${target_user//[^a-zA-Z0-9_-]/_}"
+    local sudoers_file="/etc/sudoers.d/90-nodekeeper-${safe_user}"
+    local tmp_sudoers
+    tmp_sudoers=$(mktemp /tmp/nodekeeper-sudoers.XXXXXX)
+
+    mkdir -p /etc/sudoers.d
+    cat > "$tmp_sudoers" <<EOF
+${target_user} ALL=(ALL:ALL) NOPASSWD: ALL
+EOF
+    chmod 440 "$tmp_sudoers"
+
+    if command -v visudo >/dev/null 2>&1; then
+        if ! visudo -cf "$tmp_sudoers" >/dev/null 2>&1; then
+            rm -f "$tmp_sudoers"
+            err "Generated sudoers rule failed visudo syntax validation; aborting sudoers update."
+            return 1
+        fi
+    fi
+
+    chown root:root "$tmp_sudoers" 2>/dev/null || true
+    mv "$tmp_sudoers" "$sudoers_file"
+    chmod 440 "$sudoers_file"
+    ok "Passwordless sudo (NOPASSWD) configured for user '${target_user}' (${sudoers_file})."
 }
 
 load_env() {
@@ -1948,6 +1981,7 @@ Usage:
   nodeKeeper update [check|now|enable|disable|status]
                                           Check/apply script updates and control auto-update cron
   nodeKeeper fix-permissions              Fix /opt/remnanode and /opt/3x-ui permissions for ADMIN_USER
+  nodeKeeper fix-sudo                     Configure passwordless sudo (NOPASSWD) for ADMIN_USER
   nodeKeeper disable                      Stop node services and close proxy/panel ports
   nodeKeeper enable                       Start node services and open proxy/panel ports
   nodeKeeper logs [remnanode|caddy|3xui|maint|tests|autoupdate]
@@ -1985,6 +2019,7 @@ case "$SUBCMD" in
     enable)          cmd_enable_server ;;
     mode)            cmd_switch_mode "${1:-}" ;;
     fix-permissions) fix_service_dir_permissions ;;
+    fix-sudo)        configure_passwordless_sudo ;;
     update)          cmd_update "${1:-now}" "${2:-}" ;;
     schedule)
         S_ACT="${1:-status}"
@@ -2099,13 +2134,17 @@ perform_upgrade() {
     info "Running migration: updating service directory permissions for '${ADMIN_USER}'..."
     /usr/local/bin/nodeKeeper fix-permissions
 
-    # 4. Migration: refresh maintenance script without resetting existing schedule
+    # 4. Migration: enable passwordless sudo (NOPASSWD) for non-interactive tasks (v1.1.1+)
+    info "Running migration: configuring passwordless sudo for '${ADMIN_USER}'..."
+    /usr/local/bin/nodeKeeper fix-sudo
+
+    # 5. Migration: refresh maintenance script without resetting existing schedule
     if [ "$MAINT_ENABLED" = "true" ]; then
         info "Refreshing maintenance script (${NK_DIR}/maintenance.sh)..."
         /usr/local/bin/nodeKeeper schedule refresh
     fi
 
-    # 5. Migration: enable auto-update cron (keeping existing cron schedule if already set)
+    # 6. Migration: enable auto-update cron (keeping existing cron schedule if already set)
     if [ "$AUTO_UPDATE_ENABLED" = "true" ]; then
         /usr/local/bin/nodeKeeper update enable true
     else
@@ -2118,7 +2157,7 @@ perform_upgrade() {
     echo -e "  Previous Version:    ${C_CYAN}v${old_ver}${C_RESET}"
     echo -e "  Current Version:     ${C_GREEN}v${INSTALLER_VERSION}${C_RESET}"
     echo -e "  Install Mode:        ${C_CYAN}${INSTALL_MODE}${C_RESET}"
-    echo -e "  Admin User:          ${C_CYAN}${ADMIN_USER}${C_RESET} (service dir permissions applied)"
+    echo -e "  Admin User:          ${C_CYAN}${ADMIN_USER}${C_RESET} (service dir permissions & passwordless sudo applied)"
     echo -e "  Auto-Update Cron:    ${C_CYAN}${AUTO_UPDATE_ENABLED}${C_RESET}"
     echo -e "${C_GREEN}${C_BOLD}====================================================================${C_RESET}\n"
 }
@@ -2518,11 +2557,24 @@ harden_system() {
     echo "${ADMIN_USER}:${ADMIN_PASSWORD}" | chpasswd
     usermod -aG sudo,docker "$ADMIN_USER"
 
-    # Ensure sudo works cleanly
-    cat > "/etc/sudoers.d/90-nodekeeper-${ADMIN_USER}" <<EOF
-${ADMIN_USER} ALL=(ALL:ALL) ALL
+    # Ensure passwordless sudo works cleanly for non-interactive tasks
+    mkdir -p /etc/sudoers.d
+    local safe_admin_user="${ADMIN_USER//[^a-zA-Z0-9_-]/_}"
+    local sudoers_file="/etc/sudoers.d/90-nodekeeper-${safe_admin_user}"
+    local tmp_sudoers
+    tmp_sudoers=$(mktemp /tmp/nodekeeper-sudoers.XXXXXX)
+    cat > "$tmp_sudoers" <<EOF
+${ADMIN_USER} ALL=(ALL:ALL) NOPASSWD: ALL
 EOF
-    chmod 440 "/etc/sudoers.d/90-nodekeeper-${ADMIN_USER}"
+    chmod 440 "$tmp_sudoers"
+    if command -v visudo >/dev/null 2>&1 && ! visudo -cf "$tmp_sudoers" >/dev/null 2>&1; then
+        rm -f "$tmp_sudoers"
+        err "Generated sudoers file failed visudo syntax check!"
+        exit 1
+    fi
+    chown root:root "$tmp_sudoers" 2>/dev/null || true
+    mv "$tmp_sudoers" "$sudoers_file"
+    chmod 440 "$sudoers_file"
 
     # Configure SSH public key
     local user_home
@@ -2753,7 +2805,7 @@ print_final_overview() {
 
     echo -e "--------------------------------------------------------------------"
     echo -e "${C_BOLD}Hardened Access Credentials (SAVE THESE NOW!):${C_RESET}"
-    echo -e "  Admin User:          ${C_GREEN}${ADMIN_USER}${C_RESET} (sudo & docker enabled)"
+    echo -e "  Admin User:          ${C_GREEN}${ADMIN_USER}${C_RESET} (passwordless sudo & docker enabled)"
     echo -e "  Admin Password:      ${C_YELLOW}${ADMIN_PASSWORD}${C_RESET}"
     echo -e "  Root SSH Login:      ${C_RED}DISABLED${C_RESET}"
     echo -e "  Password SSH Login:  ${C_RED}$([ -s "/home/${ADMIN_USER}/.ssh/authorized_keys" ] && echo "DISABLED (SSH Key Required)" || echo "ENABLED")${C_RESET}"

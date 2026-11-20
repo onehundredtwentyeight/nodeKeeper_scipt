@@ -1,5 +1,5 @@
 # ==============================================================================
-# nodeKeeper / remnainstall v1.1 — Configuration File Example
+# nodeKeeper / remnainstall v1.1.1 — Configuration File Example
 # ==============================================================================
 # Usage:
 #   bash install.sh --config /path/to/nodekeeper.conf --yes
@@ -41,7 +41,7 @@ XUI_PORT=""
 XUI_WEB_BASE_PATH="/"
 
 # 6. System Hardening & User Credentials
-# New sudo + docker user to create (also granted ownership of /opt/remnanode and /opt/3x-ui)
+# New passwordless sudo (NOPASSWD) + docker user to create (also granted ownership of /opt/remnanode and /opt/3x-ui)
 ADMIN_USER="node"
 # Leave empty to auto-generate a strong 20-char random password
 ADMIN_PASSWORD=""

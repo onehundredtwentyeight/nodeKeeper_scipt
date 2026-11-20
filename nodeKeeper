@@ -5,7 +5,7 @@
 # ==============================================================================
 set -o pipefail
 
-NK_VERSION="1.1"
+NK_VERSION="1.1.1"
 NK_REPO_RAW_URL_DEFAULT="https://raw.githubusercontent.com/onehundredtwentyeight/nodeKeeper_scipt/main"
 NK_DIR="/opt/nodekeeper"
 NK_ENV="${NK_DIR}/nodekeeper.env"
@@ -176,6 +176,39 @@ fix_service_dir_permissions() {
         [ -f "${XUI_DIR}/docker-compose.yml" ] && chmod 600 "${XUI_DIR}/docker-compose.yml"
         ok "Permissions on ${XUI_DIR} updated for user '${target_user}'."
     fi
+}
+
+configure_passwordless_sudo() {
+    local target_user
+    target_user=$(resolve_admin_user || true)
+    if [ -z "$target_user" ]; then
+        warn "Could not resolve a non-root admin user; skipping passwordless sudo configuration."
+        return 0
+    fi
+
+    local safe_user="${target_user//[^a-zA-Z0-9_-]/_}"
+    local sudoers_file="/etc/sudoers.d/90-nodekeeper-${safe_user}"
+    local tmp_sudoers
+    tmp_sudoers=$(mktemp /tmp/nodekeeper-sudoers.XXXXXX)
+
+    mkdir -p /etc/sudoers.d
+    cat > "$tmp_sudoers" <<EOF
+${target_user} ALL=(ALL:ALL) NOPASSWD: ALL
+EOF
+    chmod 440 "$tmp_sudoers"
+
+    if command -v visudo >/dev/null 2>&1; then
+        if ! visudo -cf "$tmp_sudoers" >/dev/null 2>&1; then
+            rm -f "$tmp_sudoers"
+            err "Generated sudoers rule failed visudo syntax validation; aborting sudoers update."
+            return 1
+        fi
+    fi
+
+    chown root:root "$tmp_sudoers" 2>/dev/null || true
+    mv "$tmp_sudoers" "$sudoers_file"
+    chmod 440 "$sudoers_file"
+    ok "Passwordless sudo (NOPASSWD) configured for user '${target_user}' (${sudoers_file})."
 }
 
 load_env() {
@@ -1537,6 +1570,7 @@ Usage:
   nodeKeeper update [check|now|enable|disable|status]
                                           Check/apply script updates and control auto-update cron
   nodeKeeper fix-permissions              Fix /opt/remnanode and /opt/3x-ui permissions for ADMIN_USER
+  nodeKeeper fix-sudo                     Configure passwordless sudo (NOPASSWD) for ADMIN_USER
   nodeKeeper disable                      Stop node services and close proxy/panel ports
   nodeKeeper enable                       Start node services and open proxy/panel ports
   nodeKeeper logs [remnanode|caddy|3xui|maint|tests|autoupdate]
@@ -1574,6 +1608,7 @@ case "$SUBCMD" in
     enable)          cmd_enable_server ;;
     mode)            cmd_switch_mode "${1:-}" ;;
     fix-permissions) fix_service_dir_permissions ;;
+    fix-sudo)        configure_passwordless_sudo ;;
     update)          cmd_update "${1:-now}" "${2:-}" ;;
     schedule)
         S_ACT="${1:-status}"
