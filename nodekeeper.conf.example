@@ -1,5 +1,5 @@
 # ==============================================================================
-# nodeKeeper / remnainstall v1.1.1 — Configuration File Example
+# nodeKeeper / remnainstall v1.2 — Configuration File Example
 # ==============================================================================
 # Usage:
 #   bash install.sh --config /path/to/nodekeeper.conf --yes
@@ -24,21 +24,31 @@ SELF_STEAL_DOMAIN="node.example.com"
 # Required only for INSTALL_MODE="selfsteal-multi" (Zone.DNS:Edit permission)
 CLOUDFLARE_API_TOKEN="cfut_your_cloudflare_api_token_here"
 
-# 4. Panel / Main Node Connection Settings
-# IPv4 address of your Remnawave Panel (or Main/Central Node for 3x-ui panel port whitelist)
+# 4. Panel / Central Node Connection Settings
+# IPv4 address of your Remnawave Panel (required for Remnanode modes)
+# OR Central 3x-ui Panel IPv4 (optional for 3xui: leave empty to allow panel access from any IP)
 PANEL_IP="203.0.113.10"
 # Port listened by remnanode for panel control (Remnanode modes only)
 NODE_PORT="2222"
 # Base64 SECRET_KEY copied from the Remnawave Panel (Remnanode modes only)
 SECRET_KEY="eyJub2RlQ2VydFBlbSI6Ii..."
 
-# 5. 3x-ui Panel Settings (used only when INSTALL_MODE="3xui")
-# Leave empty to auto-generate random values during installation
+# 5. 3x-ui Panel Settings (used only when INSTALL_MODE="3xui", Docker deployment)
+# SSL configuration:
+#   domain - Issue Let's Encrypt SSL certificate for XUI_SSL_DOMAIN
+#   ip     - Issue Let's Encrypt short-lived SSL certificate for the server's public IPv4
+#   none   - Skip SSL (HTTP mode, e.g. behind a reverse proxy or SSH tunnel)
+XUI_SSL_MODE="none"
+XUI_SSL_DOMAIN=""
+# Leave username, password, port, and URI path empty to auto-generate random values
 XUI_USERNAME=""
 XUI_PASSWORD=""
 XUI_PORT=""
-# Optional custom web base path (default: "/")
-XUI_WEB_BASE_PATH="/"
+XUI_WEB_BASE_PATH=""
+# Database backend in Docker:
+#   sqlite   - SQLite database file in /opt/3x-ui/db/x-ui.db (mounted to /etc/x-ui/)
+#   postgres - PostgreSQL 16 container (3xui_postgres) with data in /opt/3x-ui/pgdata
+XUI_DB_TYPE="sqlite"
 
 # 6. System Hardening & User Credentials
 # New passwordless sudo (NOPASSWD) + docker user to create (also granted ownership of /opt/remnanode and /opt/3x-ui)

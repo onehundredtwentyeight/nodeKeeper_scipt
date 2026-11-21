@@ -29,4 +29,27 @@ services:
     environment:
       - XRAY_VMESS_AEAD_FORCED=false
       - XUI_ENABLE_FAIL2BAN=true
+      # Uncomment below (and the postgres service) when XUI_DB_TYPE=postgres:
+      # - XUI_DB_TYPE=postgres
+      # - XUI_DB_DSN=postgres://xui:${XUI_PG_PASSWORD}@127.0.0.1:5432/xui?sslmode=disable
     tty: true
+
+  # Optional PostgreSQL backend container (automatically enabled by nodeKeeper when XUI_DB_TYPE=postgres):
+  # postgres:
+  #   image: postgres:16-alpine
+  #   container_name: 3xui_postgres
+  #   hostname: 3xui-postgres
+  #   <<: [*common, *logging]
+  #   ports:
+  #     - "127.0.0.1:5432:5432"
+  #   environment:
+  #     - POSTGRES_USER=xui
+  #     - POSTGRES_PASSWORD=${XUI_PG_PASSWORD}
+  #     - POSTGRES_DB=xui
+  #   volumes:
+  #     - ./pgdata/:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U xui -d xui"]
+  #     interval: 2s
+  #     timeout: 5s
+  #     retries: 15

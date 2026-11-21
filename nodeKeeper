@@ -5,13 +5,14 @@
 # ==============================================================================
 set -o pipefail
 
-NK_VERSION="1.1.1"
+NK_VERSION="1.2"
 NK_REPO_RAW_URL_DEFAULT="https://raw.githubusercontent.com/onehundredtwentyeight/nodeKeeper_scipt/main"
 NK_DIR="/opt/nodekeeper"
 NK_ENV="${NK_DIR}/nodekeeper.env"
 NK_LOG_DIR="${NK_DIR}/logs"
 NK_MAINT_SCRIPT="${NK_DIR}/maintenance.sh"
 NK_AUTOUPDATE_LOG="${NK_LOG_DIR}/autoupdate.log"
+NK_XUI_TOKEN_FILE="${NK_DIR}/.xui_api_token"
 REMNA_DIR="/opt/remnanode"
 XUI_DIR="/opt/3x-ui"
 HTML_DIR="/var/www/html"
@@ -44,6 +45,25 @@ ensure_root() {
             err "This utility must be run as root or via sudo."
             exit 1
         fi
+    fi
+}
+
+tty_read() {
+    local prompt="$1"
+    local var_name="$2"
+    local default_val="${3:-}"
+    local input=""
+
+    if [ -r /dev/tty ]; then
+        read -rp "$prompt" input < /dev/tty
+    else
+        read -rp "$prompt" input
+    fi
+
+    if [ -z "$input" ] && [ -n "$default_val" ]; then
+        printf -v "$var_name" '%s' "$default_val"
+    else
+        printf -v "$var_name" '%s' "$input"
     fi
 }
 
@@ -97,11 +117,30 @@ generate_xui_username() {
     echo "${first:-u}${rest:-xuiadmin01}"
 }
 
+generate_xui_base_path() {
+    local seg
+    seg=$(openssl rand -base64 24 2>/dev/null | LC_ALL=C tr -dc 'a-z0-9' | head -c 15)
+    echo "/${seg:-xui7k9m2p4x8q1w}/"
+}
+
+normalize_web_base_path() {
+    local p="${1:-}"
+    p="${p#"${p%%[![:space:]]*}"}"
+    p="${p%"${p##*[![:space:]]}"}"
+    if [ -z "$p" ] || [ "$p" = "/" ]; then
+        echo "/"
+        return 0
+    fi
+    [[ "$p" != /* ]] && p="/${p}"
+    [[ "$p" != */ ]] && p="${p}/"
+    echo "$p"
+}
+
 generate_xui_port() {
     local port candidate attempt=0
     while [ "$attempt" -lt 30 ]; do
         candidate=$(( (RANDOM % 50000) + 10000 ))
-        if [ "$candidate" != "${SSH_PORT:-22}" ] && [ "$candidate" != "${NODE_PORT:-2222}" ]; then
+        if [ "$candidate" != "${SSH_PORT:-22}" ] && [ "$candidate" != "${NODE_PORT:-2222}" ] && [ "$candidate" != "5432" ]; then
             if command -v ss >/dev/null 2>&1; then
                 if ! ss -tuln 2>/dev/null | grep -qE "[:.]${candidate}[[:space:]]"; then
                     port="$candidate"
@@ -115,6 +154,34 @@ generate_xui_port() {
         attempt=$((attempt + 1))
     done
     echo "${port:-20530}"
+}
+
+get_public_ipv4() {
+    curl -4 -fsSL --connect-timeout 5 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1"
+}
+
+xui_panel_scheme() {
+    if [ "${XUI_SSL_MODE:-none}" = "domain" ] || [ "${XUI_SSL_MODE:-none}" = "ip" ]; then
+        echo "https"
+    else
+        echo "http"
+    fi
+}
+
+xui_panel_host() {
+    if [ "${XUI_SSL_MODE:-none}" = "domain" ] && [ -n "${XUI_SSL_DOMAIN:-}" ]; then
+        echo "$XUI_SSL_DOMAIN"
+    else
+        get_public_ipv4
+    fi
+}
+
+xui_panel_url() {
+    local scheme host path
+    scheme=$(xui_panel_scheme)
+    host=$(xui_panel_host)
+    path=$(normalize_web_base_path "${XUI_WEB_BASE_PATH:-/}")
+    echo "${scheme}://${host}:${XUI_PORT}${path}"
 }
 
 active_compose_dir() {
@@ -171,9 +238,18 @@ fix_service_dir_permissions() {
     fi
 
     if [ -d "$XUI_DIR" ]; then
-        chown -R "${target_user}:${target_user}" "$XUI_DIR"
+        chown "${target_user}:${target_user}" "$XUI_DIR"
         chmod 750 "$XUI_DIR"
-        [ -f "${XUI_DIR}/docker-compose.yml" ] && chmod 600 "${XUI_DIR}/docker-compose.yml"
+        local sub
+        for sub in db cert acme; do
+            if [ -d "${XUI_DIR}/${sub}" ]; then
+                chown -R "${target_user}:${target_user}" "${XUI_DIR}/${sub}"
+            fi
+        done
+        if [ -f "${XUI_DIR}/docker-compose.yml" ]; then
+            chown "${target_user}:${target_user}" "${XUI_DIR}/docker-compose.yml"
+            chmod 600 "${XUI_DIR}/docker-compose.yml"
+        fi
         ok "Permissions on ${XUI_DIR} updated for user '${target_user}'."
     fi
 }
@@ -230,6 +306,10 @@ load_env() {
     XUI_USERNAME="${XUI_USERNAME:-}"
     XUI_PORT="${XUI_PORT:-}"
     XUI_WEB_BASE_PATH="${XUI_WEB_BASE_PATH:-/}"
+    XUI_SSL_MODE="${XUI_SSL_MODE:-none}"
+    XUI_SSL_DOMAIN="${XUI_SSL_DOMAIN:-}"
+    XUI_DB_TYPE="${XUI_DB_TYPE:-sqlite}"
+    XUI_PG_PASSWORD="${XUI_PG_PASSWORD:-}"
     ADMIN_USER="${ADMIN_USER:-node}"
     SSH_PORT="${SSH_PORT:-22}"
     SERVER_DISABLED="${SERVER_DISABLED:-false}"
@@ -258,6 +338,10 @@ SECRET_KEY=$(printf '%q' "${SECRET_KEY}")
 XUI_USERNAME=$(printf '%q' "${XUI_USERNAME}")
 XUI_PORT=$(printf '%q' "${XUI_PORT}")
 XUI_WEB_BASE_PATH=$(printf '%q' "${XUI_WEB_BASE_PATH}")
+XUI_SSL_MODE=$(printf '%q' "${XUI_SSL_MODE}")
+XUI_SSL_DOMAIN=$(printf '%q' "${XUI_SSL_DOMAIN}")
+XUI_DB_TYPE=$(printf '%q' "${XUI_DB_TYPE}")
+XUI_PG_PASSWORD=$(printf '%q' "${XUI_PG_PASSWORD}")
 ADMIN_USER=$(printf '%q' "${ADMIN_USER}")
 SSH_PORT=$(printf '%q' "${SSH_PORT}")
 SERVER_DISABLED=$(printf '%q' "${SERVER_DISABLED}")
@@ -581,7 +665,72 @@ EOF
 
         3xui)
             mkdir -p "$XUI_DIR" "${XUI_DIR}/db" "${XUI_DIR}/cert" "${XUI_DIR}/acme"
-            cat > "${XUI_DIR}/docker-compose.yml" <<EOF
+            if [ "${XUI_DB_TYPE:-sqlite}" = "postgres" ]; then
+                [ -z "$XUI_PG_PASSWORD" ] && XUI_PG_PASSWORD=$(generate_password)
+                save_env
+                mkdir -p "${XUI_DIR}/pgdata"
+                cat > "${XUI_DIR}/docker-compose.yml" <<EOF
+x-common: &common
+  ulimits:
+    nofile:
+      soft: 1048576
+      hard: 1048576
+  restart: unless-stopped
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: 100m
+      max-file: 5
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: 3xui_postgres
+    hostname: 3xui-postgres
+    <<: [*common, *logging]
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      - POSTGRES_USER=xui
+      - POSTGRES_PASSWORD=${XUI_PG_PASSWORD}
+      - POSTGRES_DB=xui
+    volumes:
+      - ./pgdata/:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xui -d xui"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  3xui:
+    image: ghcr.io/mhsanaei/3x-ui:latest
+    container_name: 3xui_app
+    hostname: 3xui
+    <<: [*common, *logging]
+    network_mode: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./db/:/etc/x-ui/
+      - ./cert/:/root/cert/
+      - ./acme/:/root/.acme.sh/
+    environment:
+      - XRAY_VMESS_AEAD_FORCED=false
+      - XUI_ENABLE_FAIL2BAN=true
+      - XUI_DB_TYPE=postgres
+      - XUI_DB_DSN=postgres://xui:${XUI_PG_PASSWORD}@127.0.0.1:5432/xui?sslmode=disable
+    tty: true
+EOF
+            else
+                XUI_DB_TYPE="sqlite"
+                save_env
+                cat > "${XUI_DIR}/docker-compose.yml" <<EOF
 x-common: &common
   ulimits:
     nofile:
@@ -615,6 +764,7 @@ services:
       - XUI_ENABLE_FAIL2BAN=true
     tty: true
 EOF
+            fi
             ;;
 
         *)
@@ -626,6 +776,207 @@ EOF
     fix_service_dir_permissions
 }
 
+# ==============================================================================
+# 3x-ui Container Helpers (DB Readiness, CLI Execution, SSL & API Token)
+# ==============================================================================
+ensure_3xui_db_ready() {
+    if [ "${XUI_DB_TYPE:-sqlite}" = "postgres" ] && [ -f "${XUI_DIR}/docker-compose.yml" ]; then
+        info "Starting PostgreSQL container (3xui_postgres) and waiting for readiness..."
+        (cd "$XUI_DIR" && docker compose up -d postgres)
+        local attempt=0
+        while [ "$attempt" -lt 25 ]; do
+            if docker exec 3xui_postgres pg_isready -U xui -d xui >/dev/null 2>&1; then
+                ok "PostgreSQL database is ready."
+                return 0
+            fi
+            sleep 1
+            attempt=$((attempt + 1))
+        done
+        warn "PostgreSQL readiness check timed out; proceeding anyway."
+    fi
+}
+
+xui_cli() {
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx '3xui_app'; then
+        docker exec 3xui_app /app/x-ui "$@"
+    else
+        ensure_3xui_db_ready
+        (cd "$XUI_DIR" && docker compose run --rm --no-deps --entrypoint /app/x-ui 3xui "$@")
+    fi
+}
+
+setup_3xui_ssl() {
+    if [ "${XUI_SSL_MODE:-none}" = "none" ] || [ -z "${XUI_SSL_MODE:-}" ]; then
+        xui_cli cert -reset >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    # Stop 3xui_app temporarily if running so standalone HTTP-01 challenge can bind port 80
+    local was_running="false"
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx '3xui_app'; then
+        was_running="true"
+        info "Stopping 3xui_app temporarily to free port 80 for ACME HTTP-01 verification..."
+        docker stop 3xui_app >/dev/null 2>&1 || true
+    fi
+
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow 80/tcp comment 'HTTP' >/dev/null 2>&1 || true
+    fi
+
+    while true; do
+        local target_host=""
+        local cert_subdir=""
+        local is_ip_cert="false"
+
+        if [ "$XUI_SSL_MODE" = "domain" ]; then
+            while [ -z "$XUI_SSL_DOMAIN" ]; do
+                tty_read "Enter domain name for 3x-ui Panel SSL: " XUI_SSL_DOMAIN
+            done
+            target_host="$XUI_SSL_DOMAIN"
+            cert_subdir="$XUI_SSL_DOMAIN"
+        elif [ "$XUI_SSL_MODE" = "ip" ]; then
+            target_host=$(get_public_ipv4)
+            cert_subdir="ip"
+            is_ip_cert="true"
+        else
+            break
+        fi
+
+        info "Requesting Let's Encrypt SSL certificate for '${target_host}' via acme.sh (port 80)..."
+        mkdir -p "${XUI_DIR}/acme" "${XUI_DIR}/cert/${cert_subdir}"
+
+        local acme_log
+        acme_log=$(mktemp /tmp/nodekeeper-acme.XXXXXX)
+
+        local acme_cmd=""
+        if [ "$is_ip_cert" = "true" ]; then
+            acme_cmd="set -e
+if [ ! -f /root/.acme.sh/acme.sh ]; then
+    curl -fsSL https://get.acme.sh | sh
+fi
+/root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+/root/.acme.sh/acme.sh --issue -d '${target_host}' --standalone --server letsencrypt --certificate-profile shortlived --days 6 --httpport 80 --force
+mkdir -p '/root/cert/${cert_subdir}'
+/root/.acme.sh/acme.sh --install-cert -d '${target_host}' \
+    --key-file '/root/cert/${cert_subdir}/privkey.pem' \
+    --fullchain-file '/root/cert/${cert_subdir}/fullchain.pem' \
+    --reloadcmd 'pkill -HUP x-ui || true'"
+        else
+            acme_cmd="set -e
+if [ ! -f /root/.acme.sh/acme.sh ]; then
+    curl -fsSL https://get.acme.sh | sh
+fi
+/root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+/root/.acme.sh/acme.sh --issue -d '${target_host}' --standalone --httpport 80 --force
+mkdir -p '/root/cert/${cert_subdir}'
+/root/.acme.sh/acme.sh --install-cert -d '${target_host}' \
+    --key-file '/root/cert/${cert_subdir}/privkey.pem' \
+    --fullchain-file '/root/cert/${cert_subdir}/fullchain.pem' \
+    --reloadcmd 'pkill -HUP x-ui || true'"
+        fi
+
+        if (cd "$XUI_DIR" && docker compose run --rm --no-deps --entrypoint /bin/sh 3xui -c "$acme_cmd") >"$acme_log" 2>&1 \
+            && [ -s "${XUI_DIR}/cert/${cert_subdir}/fullchain.pem" ] \
+            && [ -s "${XUI_DIR}/cert/${cert_subdir}/privkey.pem" ]; then
+            rm -f "$acme_log"
+            info "Binding SSL certificate to 3x-ui panel..."
+            xui_cli cert -webCert "/root/cert/${cert_subdir}/fullchain.pem" -webCertKey "/root/cert/${cert_subdir}/privkey.pem"
+            ok "SSL certificate issued and configured for '${target_host}' (/root/cert/${cert_subdir}/)."
+            break
+        fi
+
+        echo -e "\n${C_RED}${C_BOLD}====================================================================${C_RESET}"
+        err "SSL certificate issuance via acme.sh FAILED for '${target_host}'!"
+        warn "Error log from acme.sh:"
+        echo -e "${C_YELLOW}--------------------------------------------------------------------${C_RESET}"
+        cat "$acme_log"
+        echo -e "${C_YELLOW}--------------------------------------------------------------------${C_RESET}"
+        rm -f "$acme_log"
+        warn "Possible reasons: domain DNS A-record does not point to this server, port 80 is occupied or filtered by an upstream firewall, or Let's Encrypt rate limit reached."
+        echo -e "${C_RED}${C_BOLD}====================================================================${C_RESET}\n"
+
+        if [ "${UNATTENDED:-false}" = "true" ]; then
+            warn "Unattended mode: falling back to HTTP mode (XUI_SSL_MODE=none) and updating nodeKeeper configuration."
+            XUI_SSL_MODE="none"
+            XUI_SSL_DOMAIN=""
+            save_env
+            xui_cli cert -reset >/dev/null 2>&1 || true
+            break
+        fi
+
+        echo -e "${C_BOLD}Execution paused. How would you like to proceed?${C_RESET}"
+        if [ "$XUI_SSL_MODE" = "domain" ]; then
+            echo "  1) Try again (re-run acme.sh or enter a different domain)"
+        else
+            echo "  1) Try again (re-run acme.sh for IP ${target_host})"
+        fi
+        echo "  2) Continue with HTTP (disable SSL and update nodeKeeper configuration to HTTP mode)"
+
+        local ssl_err_choice=""
+        tty_read "Select option [1-2, default 2]: " ssl_err_choice "2"
+        case "$ssl_err_choice" in
+            1)
+                if [ "$XUI_SSL_MODE" = "domain" ]; then
+                    local new_dom=""
+                    tty_read "Enter domain name to retry [Enter to keep '${XUI_SSL_DOMAIN}']: " new_dom "$XUI_SSL_DOMAIN"
+                    XUI_SSL_DOMAIN="$new_dom"
+                    save_env
+                fi
+                info "Retrying SSL certificate issuance..."
+                ;;
+            *)
+                XUI_SSL_MODE="none"
+                XUI_SSL_DOMAIN=""
+                save_env
+                xui_cli cert -reset >/dev/null 2>&1 || true
+                warn "Switched 3x-ui panel to HTTP mode (XUI_SSL_MODE=none saved in nodeKeeper configuration)."
+                break
+                ;;
+        esac
+    done
+
+    if [ "$was_running" = "true" ]; then
+        (cd "$XUI_DIR" && docker compose up -d --remove-orphans)
+    fi
+}
+
+mint_3xui_api_token() {
+    local token_out api_token
+    token_out=$(xui_cli setting -getApiToken 2>/dev/null || true)
+    api_token=$(echo "$token_out" | awk '/^apiToken:/ {print $2; exit}')
+    if [ -n "$api_token" ]; then
+        (
+            umask 077
+            echo "$api_token" > "$NK_XUI_TOKEN_FILE"
+            chmod 600 "$NK_XUI_TOKEN_FILE"
+        )
+        echo "$api_token"
+        return 0
+    fi
+    return 1
+}
+
+cmd_xui_token() {
+    if [ "$INSTALL_MODE" != "3xui" ]; then
+        err "This node is not running in 3xui mode (current mode: ${INSTALL_MODE})."
+        return 1
+    fi
+    info "Generating / rotating 3x-ui API key (token) for Central Panel..."
+    local tok
+    if tok=$(mint_3xui_api_token) && [ -n "$tok" ]; then
+        rm -f "$NK_XUI_TOKEN_FILE"
+        echo -e "\n${C_BOLD}====================================================================${C_RESET}"
+        echo -e "${C_BOLD}            3x-ui Node API Key (for Central Panel)                  ${C_RESET}"
+        echo -e "${C_BOLD}====================================================================${C_RESET}"
+        echo -e "  Panel URL:   ${C_CYAN}$(xui_panel_url)${C_RESET}"
+        echo -e "  API Key:     ${C_GREEN}${C_BOLD}${tok}${C_RESET}"
+        echo -e "${C_BOLD}====================================================================${C_RESET}\n"
+    else
+        err "Failed to generate API token via '/app/x-ui setting -getApiToken'."
+        return 1
+    fi
+}
+
 init_3xui_settings() {
     local init_pass="${1:-}"
     if [ ! -f "${XUI_DIR}/docker-compose.yml" ]; then
@@ -633,24 +984,38 @@ init_3xui_settings() {
         return 1
     fi
 
-    info "Pulling 3x-ui Docker image..."
+    info "Pulling 3x-ui Docker image(s)..."
     (cd "$XUI_DIR" && docker compose pull)
+
+    ensure_3xui_db_ready
+
+    XUI_WEB_BASE_PATH=$(normalize_web_base_path "${XUI_WEB_BASE_PATH:-/}")
+    save_env
 
     local -a setting_args=()
     [ -n "$XUI_USERNAME" ] && setting_args+=(-username "$XUI_USERNAME")
     [ -n "$init_pass" ] && setting_args+=(-password "$init_pass")
     [ -n "$XUI_PORT" ] && setting_args+=(-port "$XUI_PORT")
-    if [ -n "$XUI_WEB_BASE_PATH" ] && [ "$XUI_WEB_BASE_PATH" != "/" ]; then
-        setting_args+=(-webBasePath "$XUI_WEB_BASE_PATH")
-    fi
+    [ -n "$XUI_WEB_BASE_PATH" ] && setting_args+=(-webBasePath "$XUI_WEB_BASE_PATH")
 
     if [ ${#setting_args[@]} -gt 0 ]; then
-        info "Configuring 3x-ui panel credentials and port (${XUI_PORT})..."
-        if (cd "$XUI_DIR" && docker compose run --rm --entrypoint /app/x-ui 3xui setting "${setting_args[@]}"); then
+        info "Configuring 3x-ui panel credentials, port (${XUI_PORT}), and path (${XUI_WEB_BASE_PATH})..."
+        if xui_cli setting "${setting_args[@]}"; then
             ok "3x-ui panel settings applied."
         else
-            warn "3x-ui CLI setting command returned non-zero; verify credentials via 'docker exec 3xui_app /app/x-ui setting -show true'."
+            warn "3x-ui CLI setting command returned non-zero; verify credentials via 'nodeKeeper status'."
         fi
+    fi
+
+    # Configure SSL (domain / IP / HTTP)
+    setup_3xui_ssl
+
+    # Mint API key for central 3x-ui panel
+    info "Generating 3x-ui API key for Central Panel integration..."
+    if mint_3xui_api_token >/dev/null; then
+        ok "3x-ui API key generated."
+    else
+        warn "Could not auto-generate 3x-ui API key; you can generate it anytime with 'nodeKeeper xui-token'."
     fi
 }
 
@@ -922,6 +1287,7 @@ apply_firewall() {
         ufw delete allow 80/tcp >/dev/null 2>&1 || true
         ufw delete allow 443/tcp >/dev/null 2>&1 || true
         ufw delete allow 443/udp >/dev/null 2>&1 || true
+        [ -n "$XUI_PORT" ] && ufw delete allow "${XUI_PORT}/tcp" >/dev/null 2>&1 || true
         if [ -n "$PANEL_IP" ]; then
             [ -n "$NODE_PORT" ] && ufw delete allow from "$PANEL_IP" to any port "$NODE_PORT" proto tcp >/dev/null 2>&1 || true
             [ -n "$XUI_PORT" ] && ufw delete allow from "$PANEL_IP" to any port "$XUI_PORT" proto tcp >/dev/null 2>&1 || true
@@ -934,12 +1300,20 @@ apply_firewall() {
             if [ -n "$PANEL_IP" ] && [ -n "$NODE_PORT" ] && [ "$NODE_PORT" != "$XUI_PORT" ]; then
                 ufw delete allow from "$PANEL_IP" to any port "$NODE_PORT" proto tcp >/dev/null 2>&1 || true
             fi
-            if [ -n "$PANEL_IP" ] && [ -n "$XUI_PORT" ]; then
-                ufw allow from "$PANEL_IP" to any port "$XUI_PORT" proto tcp comment '3x-ui-Panel' >/dev/null 2>&1 || true
+            if [ -n "$XUI_PORT" ]; then
+                if [ -n "$PANEL_IP" ]; then
+                    ufw delete allow "${XUI_PORT}/tcp" >/dev/null 2>&1 || true
+                    ufw allow from "$PANEL_IP" to any port "$XUI_PORT" proto tcp comment '3x-ui-Panel' >/dev/null 2>&1 || true
+                else
+                    ufw allow "${XUI_PORT}/tcp" comment '3x-ui-Panel' >/dev/null 2>&1 || true
+                fi
             fi
         else
-            if [ -n "$PANEL_IP" ] && [ -n "$XUI_PORT" ] && [ "$XUI_PORT" != "$NODE_PORT" ]; then
-                ufw delete allow from "$PANEL_IP" to any port "$XUI_PORT" proto tcp >/dev/null 2>&1 || true
+            if [ -n "$XUI_PORT" ] && [ "$XUI_PORT" != "$NODE_PORT" ]; then
+                ufw delete allow "${XUI_PORT}/tcp" >/dev/null 2>&1 || true
+                if [ -n "$PANEL_IP" ]; then
+                    ufw delete allow from "$PANEL_IP" to any port "$XUI_PORT" proto tcp >/dev/null 2>&1 || true
+                fi
             fi
             if [ -n "$PANEL_IP" ] && [ -n "$NODE_PORT" ]; then
                 ufw allow from "$PANEL_IP" to any port "$NODE_PORT" proto tcp comment 'Remnawave-Panel' >/dev/null 2>&1 || true
@@ -959,9 +1333,12 @@ cmd_status() {
     echo -e "Install Mode:      ${C_CYAN}${INSTALL_MODE}${C_RESET}"
     echo -e "Server Disabled:   ${C_CYAN}${SERVER_DISABLED}${C_RESET}"
     if [ "$INSTALL_MODE" = "3xui" ]; then
-        echo -e "Main Node IP:      ${C_CYAN}${PANEL_IP:-<not set>}${C_RESET} (3x-ui Port: ${XUI_PORT:-<not set>})"
+        echo -e "3x-ui Panel URL:   ${C_CYAN}$(xui_panel_url)${C_RESET}"
+        echo -e "3x-ui SSL Mode:    ${C_CYAN}${XUI_SSL_MODE:-none}${C_RESET}$([ "${XUI_SSL_MODE:-none}" = "domain" ] && echo " (${XUI_SSL_DOMAIN})")"
+        echo -e "3x-ui Database:    ${C_CYAN}${XUI_DB_TYPE:-sqlite}${C_RESET}"
+        echo -e "3x-ui Port & Path: ${C_CYAN}${XUI_PORT:-<not set>}${C_RESET} (Path: ${XUI_WEB_BASE_PATH:-/})"
         echo -e "3x-ui Username:    ${C_CYAN}${XUI_USERNAME:-<not set>}${C_RESET}"
-        echo -e "3x-ui Path:        ${C_CYAN}${XUI_WEB_BASE_PATH:-/}${C_RESET}"
+        echo -e "Central Panel IP:  ${C_CYAN}${PANEL_IP:-Unrestricted (open to all IPs)}${C_RESET}"
         echo -e "Compose Dir:       ${C_CYAN}${XUI_DIR}${C_RESET}"
     else
         [ -n "$SELF_STEAL_DOMAIN" ] && echo -e "Selfsteal Domain:  ${C_CYAN}${SELF_STEAL_DOMAIN}${C_RESET}"
@@ -1068,7 +1445,8 @@ cmd_switch_mode() {
         echo "  2) selfsteal-single — Remnanode + Caddy (one server per domain)"
         echo "  3) selfsteal-multi  — Remnanode + Caddy with Cloudflare DNS plugin (multi-server)"
         echo "  4) 3xui             — 3x-ui Panel in Docker container"
-        read -rp "Enter choice [1-4]: " m_choice
+        local m_choice=""
+        tty_read "Enter choice [1-4]: " m_choice ""
         case "$m_choice" in
             1) target_mode="basic" ;;
             2) target_mode="selfsteal-single" ;;
@@ -1079,59 +1457,112 @@ cmd_switch_mode() {
     fi
 
     local xui_pass="${XUI_INIT_PASSWORD:-}"
+    local is_fresh_xui="false"
 
     case "$target_mode" in
         1|basic|no-caddy)
             target_mode="basic"
+            while ! validate_ipv4 "$PANEL_IP"; do
+                tty_read "Enter Remnawave Panel IPv4 address: " PANEL_IP
+            done
             if [ -z "$SECRET_KEY" ]; then
-                read -rp "Paste Remnanode SECRET_KEY: " SECRET_KEY
+                tty_read "Paste Remnanode SECRET_KEY: " SECRET_KEY
             fi
             ;;
         2|selfsteal-single|single|selfsteal)
             target_mode="selfsteal-single"
             if [ -z "$SELF_STEAL_DOMAIN" ]; then
-                read -rp "Enter Selfsteal Domain (e.g. node.example.com): " SELF_STEAL_DOMAIN
+                tty_read "Enter Selfsteal Domain (e.g. node.example.com): " SELF_STEAL_DOMAIN
             fi
+            while ! validate_ipv4 "$PANEL_IP"; do
+                tty_read "Enter Remnawave Panel IPv4 address: " PANEL_IP
+            done
             if [ -z "$SECRET_KEY" ]; then
-                read -rp "Paste Remnanode SECRET_KEY: " SECRET_KEY
+                tty_read "Paste Remnanode SECRET_KEY: " SECRET_KEY
             fi
             ;;
         3|selfsteal-multi|multi|cloudflare)
             target_mode="selfsteal-multi"
             if [ -z "$SELF_STEAL_DOMAIN" ]; then
-                read -rp "Enter Selfsteal Domain (e.g. node.example.com): " SELF_STEAL_DOMAIN
+                tty_read "Enter Selfsteal Domain (e.g. node.example.com): " SELF_STEAL_DOMAIN
             fi
             if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-                read -rp "Enter Cloudflare API Token (DNS Edit permission): " CLOUDFLARE_API_TOKEN
+                tty_read "Enter Cloudflare API Token (DNS Edit permission): " CLOUDFLARE_API_TOKEN
             fi
+            while ! validate_ipv4 "$PANEL_IP"; do
+                tty_read "Enter Remnawave Panel IPv4 address: " PANEL_IP
+            done
             if [ -z "$SECRET_KEY" ]; then
-                read -rp "Paste Remnanode SECRET_KEY: " SECRET_KEY
+                tty_read "Paste Remnanode SECRET_KEY: " SECRET_KEY
             fi
             ;;
         4|3xui|3x-ui|xui|x-ui)
             target_mode="3xui"
-            if [ -z "$XUI_USERNAME" ]; then
+            if [ "${NK_FROM_INSTALLER:-false}" != "true" ]; then
+                is_fresh_xui="true"
+                echo -e "\n${C_BOLD}--- 3x-ui Panel Configuration ---${C_RESET}"
+                echo "  1) domain — Issue Let's Encrypt SSL certificate for a domain"
+                echo "  2) ip     — Issue Let's Encrypt short-lived SSL certificate for server IP"
+                echo "  3) none   — Skip SSL (HTTP only, for reverse proxy / SSH tunnel)"
+                local ssl_ch=""
+                tty_read "Select SSL mode [1-3, default 3]: " ssl_ch "3"
+                case "$ssl_ch" in
+                    1|domain)
+                        XUI_SSL_MODE="domain"
+                        tty_read "Enter domain for 3x-ui panel [${XUI_SSL_DOMAIN}]: " XUI_SSL_DOMAIN "$XUI_SSL_DOMAIN"
+                        ;;
+                    2|ip)
+                        XUI_SSL_MODE="ip"
+                        XUI_SSL_DOMAIN=""
+                        ;;
+                    *)
+                        XUI_SSL_MODE="none"
+                        XUI_SSL_DOMAIN=""
+                        ;;
+                esac
+
                 local def_u
-                def_u=$(generate_xui_username)
-                read -rp "Enter 3x-ui Panel username [default: ${def_u}]: " XUI_USERNAME
-                XUI_USERNAME="${XUI_USERNAME:-$def_u}"
-            fi
-            if [ -z "$xui_pass" ] && [ ! -f "${XUI_DIR}/db/x-ui.db" ]; then
+                def_u="${XUI_USERNAME:-$(generate_xui_username)}"
+                tty_read "Enter 3x-ui Panel username [default: ${def_u}]: " XUI_USERNAME "$def_u"
+
                 local def_p
                 def_p=$(generate_password)
-                read -rp "Enter 3x-ui Panel password [default: ${def_p}]: " xui_pass
-                xui_pass="${xui_pass:-$def_p}"
-            fi
-            if [ -z "$XUI_PORT" ]; then
+                tty_read "Enter 3x-ui Panel password [default: ${def_p}]: " xui_pass "$def_p"
+
                 local def_port
-                def_port=$(generate_xui_port)
-                read -rp "Enter 3x-ui Panel port [default: ${def_port}]: " XUI_PORT
-                XUI_PORT="${XUI_PORT:-$def_port}"
+                def_port="${XUI_PORT:-$(generate_xui_port)}"
+                tty_read "Enter 3x-ui Panel port [default: ${def_port}]: " XUI_PORT "$def_port"
+
+                local def_path
+                if [ -z "$XUI_WEB_BASE_PATH" ] || [ "$XUI_WEB_BASE_PATH" = "/" ]; then
+                    def_path=$(generate_xui_base_path)
+                else
+                    def_path="$XUI_WEB_BASE_PATH"
+                fi
+                tty_read "Enter 3x-ui Panel URI path (domain.com/X) [default: ${def_path}]: " XUI_WEB_BASE_PATH "$def_path"
+                XUI_WEB_BASE_PATH=$(normalize_web_base_path "$XUI_WEB_BASE_PATH")
+
+                echo "Select Database Backend (Docker):"
+                echo "  1) sqlite   — SQLite file in /opt/3x-ui/db/x-ui.db"
+                echo "  2) postgres — PostgreSQL 16 container (3xui_postgres)"
+                local db_ch=""
+                tty_read "Select DB type [1-2, default 1]: " db_ch "1"
+                case "$db_ch" in
+                    2|postgres|pg) XUI_DB_TYPE="postgres" ;;
+                    *)             XUI_DB_TYPE="sqlite" ;;
+                esac
+
+                local pip_in=""
+                tty_read "Enter Central Panel IPv4 (Enter to skip and not restrict port by IP): " pip_in ""
+                if [ -n "$pip_in" ]; then
+                    while ! validate_ipv4 "$pip_in"; do
+                        warn "Invalid IPv4 address."
+                        tty_read "Enter Central Panel IPv4 (or Enter to skip): " pip_in ""
+                        [ -z "$pip_in" ] && break
+                    done
+                fi
+                PANEL_IP="$pip_in"
             fi
-            while ! validate_ipv4 "$PANEL_IP"; do
-                read -rp "Enter Main/Central Node IPv4 address (for 3x-ui panel port whitelist): " PANEL_IP
-                validate_ipv4 "$PANEL_IP" || warn "Invalid IPv4 address format."
-            done
             ;;
         *)
             err "Invalid mode '$target_mode'. Use: basic | selfsteal-single | selfsteal-multi | 3xui"
@@ -1155,20 +1586,31 @@ cmd_switch_mode() {
     apply_firewall
 
     if [ "$INSTALL_MODE" = "3xui" ]; then
-        if [ ! -f "${XUI_DIR}/db/x-ui.db" ] || [ -n "$xui_pass" ]; then
+        if [ "${NK_FROM_INSTALLER:-false}" = "true" ] || [ "$is_fresh_xui" = "true" ] || [ -n "$xui_pass" ] || [ ! -f "${XUI_DIR}/db/x-ui.db" ]; then
             init_3xui_settings "$xui_pass"
         fi
         (cd "$XUI_DIR" && docker compose up -d --remove-orphans)
         fix_service_dir_permissions
         ok "Successfully switched to mode: 3xui"
         if [ "${NK_FROM_INSTALLER:-false}" != "true" ]; then
-            local pub_ip
-            pub_ip=$(curl -4 -fsSL --connect-timeout 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
-            echo -e "\n${C_BOLD}--- 3x-ui Panel Access Details ---${C_RESET}"
-            echo -e "  URL:          ${C_CYAN}http://${pub_ip}:${XUI_PORT}${XUI_WEB_BASE_PATH:-/}${C_RESET}"
-            echo -e "  Port:         ${C_CYAN}${XUI_PORT}${C_RESET} (Whitelisted IP: ${PANEL_IP})"
-            echo -e "  Username:     ${C_GREEN}${XUI_USERNAME}${C_RESET}"
-            [ -n "$xui_pass" ] && echo -e "  Password:     ${C_YELLOW}${xui_pass}${C_RESET}"
+            local saved_tok=""
+            if [ -f "$NK_XUI_TOKEN_FILE" ]; then
+                saved_tok=$(cat "$NK_XUI_TOKEN_FILE" 2>/dev/null || true)
+                rm -f "$NK_XUI_TOKEN_FILE"
+            fi
+            echo -e "\n${C_BOLD}====================================================================${C_RESET}"
+            echo -e "${C_BOLD}                  3x-ui Panel Access Summary                        ${C_RESET}"
+            echo -e "${C_BOLD}====================================================================${C_RESET}"
+            echo -e "  Panel URL:           ${C_CYAN}$(xui_panel_url)${C_RESET}"
+            echo -e "  SSL Mode:            ${C_CYAN}${XUI_SSL_MODE}${C_RESET}$([ "$XUI_SSL_MODE" = "domain" ] && echo " (${XUI_SSL_DOMAIN})")"
+            echo -e "  Database Backend:    ${C_CYAN}${XUI_DB_TYPE}${C_RESET}"
+            echo -e "  Panel Port:          ${C_CYAN}${XUI_PORT}${C_RESET}"
+            echo -e "  Panel URI Path:      ${C_CYAN}${XUI_WEB_BASE_PATH}${C_RESET}"
+            echo -e "  Central Panel IP:    ${C_CYAN}${PANEL_IP:-Unrestricted (open to all IPs)}${C_RESET}"
+            echo -e "  Username:            ${C_GREEN}${XUI_USERNAME}${C_RESET}"
+            [ -n "$xui_pass" ] && echo -e "  Password:            ${C_YELLOW}${xui_pass}${C_RESET}"
+            [ -n "$saved_tok" ] && echo -e "  API Key (Token):     ${C_GREEN}${C_BOLD}${saved_tok}${C_RESET}"
+            echo -e "${C_BOLD}====================================================================${C_RESET}\n"
         fi
     else
         (cd "$REMNA_DIR" && docker compose up -d --build --remove-orphans)
@@ -1211,6 +1653,7 @@ cmd_uninstall() {
         ufw delete allow 80/tcp >/dev/null 2>&1 || true
         ufw delete allow 443/tcp >/dev/null 2>&1 || true
         ufw delete allow 443/udp >/dev/null 2>&1 || true
+        [ -n "$XUI_PORT" ] && ufw delete allow "${XUI_PORT}/tcp" >/dev/null 2>&1 || true
         if [ -n "$PANEL_IP" ]; then
             [ -n "$NODE_PORT" ] && ufw delete allow from "$PANEL_IP" to any port "$NODE_PORT" proto tcp >/dev/null 2>&1 || true
             [ -n "$XUI_PORT" ] && ufw delete allow from "$PANEL_IP" to any port "$XUI_PORT" proto tcp >/dev/null 2>&1 || true
@@ -1312,51 +1755,142 @@ menu_update() {
     done
 }
 
+xui_show_settings() {
+    echo -e "\n${C_BOLD}=== Current 3x-ui Panel Configuration ===${C_RESET}"
+    echo -e "  Access URL:          ${C_CYAN}$(xui_panel_url)${C_RESET}"
+    echo -e "  SSL Mode:            ${C_CYAN}${XUI_SSL_MODE:-none}${C_RESET}$([ "${XUI_SSL_MODE:-none}" = "domain" ] && echo " (${XUI_SSL_DOMAIN})")"
+    echo -e "  Database Backend:    ${C_CYAN}${XUI_DB_TYPE:-sqlite}${C_RESET}"
+    echo -e "  Panel Port:          ${C_CYAN}${XUI_PORT}${C_RESET}"
+    echo -e "  Panel URI Path:      ${C_CYAN}${XUI_WEB_BASE_PATH}${C_RESET}"
+    echo -e "  Panel Username:      ${C_CYAN}${XUI_USERNAME}${C_RESET}"
+    echo -e "  Central Panel IP:    ${C_CYAN}${PANEL_IP:-Unrestricted (open to all IPs)}${C_RESET}"
+    echo -e "--------------------------------------------------------------------"
+    echo -e "${C_BOLD}Live Settings from 3x-ui Core:${C_RESET}"
+    xui_cli setting -show true 2>/dev/null || warn "Could not query /app/x-ui setting -show true."
+    echo ""
+}
+
+xui_manage_ssl_menu() {
+    echo -e "\n${C_BOLD}--- 3x-ui Panel SSL Configuration (current: ${XUI_SSL_MODE:-none}) ---${C_RESET}"
+    echo "  1) Issue / Renew Let's Encrypt SSL for a Domain"
+    echo "  2) Issue / Renew Let's Encrypt Short-Lived SSL for Server IP ($(get_public_ipv4))"
+    echo "  3) Disable SSL (Switch to HTTP mode for reverse proxy)"
+    echo "  0) Cancel"
+    local s_ch=""
+    tty_read "Select option [0-3]: " s_ch ""
+    case "$s_ch" in
+        1)
+            XUI_SSL_MODE="domain"
+            local new_dom=""
+            tty_read "Enter domain name for 3x-ui panel [${XUI_SSL_DOMAIN}]: " new_dom "$XUI_SSL_DOMAIN"
+            if [ -z "$new_dom" ]; then
+                warn "Domain cannot be empty."
+                return 1
+            fi
+            XUI_SSL_DOMAIN="$new_dom"
+            save_env
+            setup_3xui_ssl
+            cmd_restart
+            ok "Panel URL: $(xui_panel_url)"
+            ;;
+        2)
+            XUI_SSL_MODE="ip"
+            XUI_SSL_DOMAIN=""
+            save_env
+            setup_3xui_ssl
+            cmd_restart
+            ok "Panel URL: $(xui_panel_url)"
+            ;;
+        3)
+            XUI_SSL_MODE="none"
+            XUI_SSL_DOMAIN=""
+            save_env
+            setup_3xui_ssl
+            cmd_restart
+            ok "SSL disabled. Panel is now in HTTP mode: $(xui_panel_url)"
+            ;;
+        0) return 0 ;;
+        *) warn "Invalid option." ;;
+    esac
+}
+
+xui_switch_db_menu() {
+    echo -e "\n${C_BOLD}--- 3x-ui Database Backend (current: ${XUI_DB_TYPE:-sqlite}) ---${C_RESET}"
+    echo "  1) SQLite     (/opt/3x-ui/db/x-ui.db)"
+    echo "  2) PostgreSQL (container: 3xui_postgres, /opt/3x-ui/pgdata)"
+    echo "  0) Cancel"
+    local db_opt=""
+    tty_read "Select target database backend [0-2]: " db_opt ""
+    case "$db_opt" in
+        1)
+            if [ "${XUI_DB_TYPE:-sqlite}" = "sqlite" ]; then
+                info "Already using SQLite."
+                return 0
+            fi
+            XUI_DB_TYPE="sqlite"
+            save_env
+            write_mode_configs "3xui"
+            cmd_restart
+            ok "Switched 3x-ui database backend to SQLite."
+            ;;
+        2)
+            if [ "${XUI_DB_TYPE:-sqlite}" = "postgres" ]; then
+                info "Already using PostgreSQL."
+                return 0
+            fi
+            [ -z "$XUI_PG_PASSWORD" ] && XUI_PG_PASSWORD=$(generate_password)
+            XUI_DB_TYPE="postgres"
+            save_env
+            write_mode_configs "3xui"
+            ensure_3xui_db_ready
+            if [ -f "${XUI_DIR}/db/x-ui.db" ]; then
+                local mig_ans=""
+                tty_read "Migrate existing SQLite data (/opt/3x-ui/db/x-ui.db) into PostgreSQL? [Y/n]: " mig_ans "Y"
+                if [[ ! "$mig_ans" =~ ^[Nn]$ ]]; then
+                    info "Migrating data from SQLite to PostgreSQL..."
+                    local dsn="postgres://xui:${XUI_PG_PASSWORD}@127.0.0.1:5432/xui?sslmode=disable"
+                    (cd "$XUI_DIR" && docker compose run --rm --no-deps --entrypoint /app/x-ui 3xui migrate-db --src /etc/x-ui/x-ui.db --dsn "$dsn") \
+                        && ok "SQLite data migrated to PostgreSQL." \
+                        || warn "Migration command reported a warning; starting panel with PostgreSQL."
+                fi
+            fi
+            cmd_restart
+            ok "Switched 3x-ui database backend to PostgreSQL."
+            ;;
+        0) return 0 ;;
+        *) warn "Invalid option." ;;
+    esac
+}
+
 menu_configs() {
     while true; do
         echo -e "\n${C_BOLD}=== Node Configuration Parameters (${INSTALL_MODE}) ===${C_RESET}"
         if [ "$INSTALL_MODE" = "3xui" ]; then
-            echo "  1) Change Main Node IP         (current: ${PANEL_IP:-<none>})"
-            echo "  2) Change 3x-ui Panel Port     (current: ${XUI_PORT:-<none>})"
-            echo "  3) Change 3x-ui Credentials    (current user: ${XUI_USERNAME:-<none>})"
-            echo "  4) Change Hostname             (current: $(hostname))"
-            echo "  5) Restart WARP Interface"
-            echo "  6) Fix Service Directory Permissions"
-            echo "  0) Back"
-            read -rp "Select option: " c_opt
+            echo "  1)  View Current 3x-ui Panel Settings & Access URL"
+            echo "  2)  Change 3x-ui Username & Password      (current user: ${XUI_USERNAME:-<none>})"
+            echo "  3)  Change 3x-ui Panel Port               (current: ${XUI_PORT:-<none>})"
+            echo "  4)  Change 3x-ui Panel URI Path           (current: ${XUI_WEB_BASE_PATH:-/})"
+            echo "  5)  Manage SSL Certificate / Domain       (current: ${XUI_SSL_MODE:-none}${XUI_SSL_DOMAIN:+ / $XUI_SSL_DOMAIN})"
+            echo "  6)  Generate / Rotate API Key (Token) for Central Panel"
+            echo "  7)  Reset Two-Factor Authentication (2FA)"
+            echo "  8)  Change / Clear Central Panel IP       (current: ${PANEL_IP:-Unrestricted})"
+            echo "  9)  Switch / Migrate Database Backend     (current: ${XUI_DB_TYPE:-sqlite})"
+            echo "  10) Configure 3x-ui Telegram Bot"
+            echo "  11) Open Native 3x-ui CLI Menu (docker exec -it 3xui_app x-ui)"
+            echo "  12) Change Server Hostname                (current: $(hostname))"
+            echo "  13) Restart WARP Interface"
+            echo "  14) Fix Service Directory & Sudo Permissions"
+            echo "  0)  Back"
+            read -rp "Select option [0-14]: " c_opt
             case "$c_opt" in
                 1)
-                    read -rp "Enter new Main Node IPv4: " new_pip
-                    if validate_ipv4 "$new_pip"; then
-                        if command -v ufw >/dev/null 2>&1 && [ -n "$PANEL_IP" ] && [ -n "$XUI_PORT" ]; then
-                            ufw delete allow from "$PANEL_IP" to any port "$XUI_PORT" proto tcp >/dev/null 2>&1 || true
-                        fi
-                        PANEL_IP="$new_pip"
-                        save_env
-                        apply_firewall
-                        ok "Main Node IP updated to ${PANEL_IP}."
-                    else
-                        warn "Invalid IPv4 address."
-                    fi
+                    xui_show_settings
                     ;;
                 2)
-                    read -rp "Enter new 3x-ui Panel Port: " new_port
-                    if validate_port "$new_port"; then
-                        if command -v ufw >/dev/null 2>&1 && [ -n "$PANEL_IP" ] && [ -n "$XUI_PORT" ]; then
-                            ufw delete allow from "$PANEL_IP" to any port "$XUI_PORT" proto tcp >/dev/null 2>&1 || true
-                        fi
-                        XUI_PORT="$new_port"
-                        save_env
-                        docker exec 3xui_app /app/x-ui setting -port "$XUI_PORT" 2>/dev/null || warn "Could not exec into 3xui_app; make sure container is running."
-                        apply_firewall
-                        cmd_restart
-                    else
-                        warn "Invalid port number (1-65535)."
-                    fi
-                    ;;
-                3)
-                    read -rp "Enter new 3x-ui username [${XUI_USERNAME}]: " new_u
-                    new_u="${new_u:-$XUI_USERNAME}"
+                    local def_u
+                    def_u="${XUI_USERNAME:-$(generate_xui_username)}"
+                    read -rp "Enter new 3x-ui username [Enter for ${def_u}]: " new_u
+                    new_u="${new_u:-$def_u}"
                     local def_p
                     def_p=$(generate_password)
                     read -rp "Enter new 3x-ui password [Enter for random: ${def_p}]: " new_p
@@ -1364,15 +1898,108 @@ menu_configs() {
                     if [ -n "$new_u" ] && [ -n "$new_p" ]; then
                         XUI_USERNAME="$new_u"
                         save_env
-                        if docker exec 3xui_app /app/x-ui setting -username "$new_u" -password "$new_p"; then
+                        if xui_cli setting -username "$new_u" -password "$new_p"; then
                             cmd_restart
                             ok "3x-ui credentials updated (User: ${new_u} | Password: ${new_p})."
                         else
-                            err "Failed to update 3x-ui credentials inside container."
+                            err "Failed to update 3x-ui credentials."
                         fi
                     fi
                     ;;
+                3)
+                    local def_port
+                    def_port=$(generate_xui_port)
+                    read -rp "Enter new 3x-ui Panel Port [Enter for random: ${def_port}]: " new_port
+                    new_port="${new_port:-$def_port}"
+                    if validate_port "$new_port"; then
+                        if command -v ufw >/dev/null 2>&1 && [ -n "$XUI_PORT" ]; then
+                            ufw delete allow "${XUI_PORT}/tcp" >/dev/null 2>&1 || true
+                            [ -n "$PANEL_IP" ] && ufw delete allow from "$PANEL_IP" to any port "$XUI_PORT" proto tcp >/dev/null 2>&1 || true
+                        fi
+                        XUI_PORT="$new_port"
+                        save_env
+                        xui_cli setting -port "$XUI_PORT" || warn "Could not apply port via x-ui CLI."
+                        apply_firewall
+                        cmd_restart
+                        ok "3x-ui port updated to ${XUI_PORT}. URL: $(xui_panel_url)"
+                    else
+                        warn "Invalid port number (1-65535)."
+                    fi
+                    ;;
                 4)
+                    local def_path
+                    def_path=$(generate_xui_base_path)
+                    read -rp "Enter new URI path (e.g. /secret/) [Enter for random: ${def_path}]: " new_path
+                    new_path="${new_path:-$def_path}"
+                    XUI_WEB_BASE_PATH=$(normalize_web_base_path "$new_path")
+                    save_env
+                    if xui_cli setting -webBasePath "$XUI_WEB_BASE_PATH"; then
+                        cmd_restart
+                        ok "3x-ui URI path updated to ${XUI_WEB_BASE_PATH}. URL: $(xui_panel_url)"
+                    else
+                        err "Failed to update 3x-ui URI path."
+                    fi
+                    ;;
+                5)
+                    xui_manage_ssl_menu
+                    ;;
+                6)
+                    cmd_xui_token
+                    ;;
+                7)
+                    if xui_cli setting -resetTwoFactor; then
+                        cmd_restart
+                        ok "Two-factor authentication (2FA) has been reset."
+                    else
+                        err "Failed to reset 2FA."
+                    fi
+                    ;;
+                8)
+                    read -rp "Enter new Central Panel IPv4 (or type 'none' to remove IP restriction): " new_pip
+                    if [ "$new_pip" = "none" ] || [ "$new_pip" = "clear" ] || [ -z "$new_pip" ]; then
+                        if command -v ufw >/dev/null 2>&1 && [ -n "$PANEL_IP" ] && [ -n "$XUI_PORT" ]; then
+                            ufw delete allow from "$PANEL_IP" to any port "$XUI_PORT" proto tcp >/dev/null 2>&1 || true
+                        fi
+                        PANEL_IP=""
+                        save_env
+                        apply_firewall
+                        ok "Central Panel IP restriction removed (port ${XUI_PORT} is now open to all IPs)."
+                    elif validate_ipv4 "$new_pip"; then
+                        if command -v ufw >/dev/null 2>&1 && [ -n "$XUI_PORT" ]; then
+                            ufw delete allow "${XUI_PORT}/tcp" >/dev/null 2>&1 || true
+                            [ -n "$PANEL_IP" ] && ufw delete allow from "$PANEL_IP" to any port "$XUI_PORT" proto tcp >/dev/null 2>&1 || true
+                        fi
+                        PANEL_IP="$new_pip"
+                        save_env
+                        apply_firewall
+                        ok "Central Panel IP whitelist updated to ${PANEL_IP}."
+                    else
+                        warn "Invalid IPv4 address."
+                    fi
+                    ;;
+                9)
+                    xui_switch_db_menu
+                    ;;
+                10)
+                    read -rp "Enter Telegram Bot Token: " tg_tok
+                    read -rp "Enter Telegram Chat ID: " tg_chat
+                    read -rp "Enter Telegram Notification Cron (e.g. '@every 1h' or '30 * * * * *', optional): " tg_rt
+                    if [ -n "$tg_tok" ] && [ -n "$tg_chat" ]; then
+                        local -a tg_args=(-tgbottoken "$tg_tok" -tgbotchatid "$tg_chat" -enabletgbot)
+                        [ -n "$tg_rt" ] && tg_args=(-tgbottoken "$tg_tok" -tgbotchatid "$tg_chat" -tgbotRuntime "$tg_rt" -enabletgbot)
+                        xui_cli setting "${tg_args[@]}" && cmd_restart && ok "Telegram bot settings updated."
+                    else
+                        warn "Bot token and Chat ID are required."
+                    fi
+                    ;;
+                11)
+                    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx '3xui_app'; then
+                        docker exec -it 3xui_app x-ui
+                    else
+                        warn "3xui_app container is not currently running. Start it first with 'nodeKeeper start'."
+                    fi
+                    ;;
+                12)
                     read -rp "Enter new full hostname: " new_hn
                     if [ -n "$new_hn" ]; then
                         hostnamectl set-hostname "$new_hn"
@@ -1381,11 +2008,12 @@ menu_configs() {
                         ok "Hostname updated to ${NODE_HOSTNAME}."
                     fi
                     ;;
-                5)
+                13)
                     systemctl restart wg-quick@warp && ok "WARP restarted." || err "Failed to restart WARP."
                     ;;
-                6)
+                14)
                     fix_service_dir_permissions
+                    configure_passwordless_sudo
                     ;;
                 0) break ;;
                 *) warn "Invalid option." ;;
@@ -1398,7 +2026,7 @@ menu_configs() {
             echo "  5) Update Remnanode SECRET_KEY"
             echo "  6) Change Hostname             (current: $(hostname))"
             echo "  7) Restart WARP Interface"
-            echo "  8) Fix Service Directory Permissions"
+            echo "  8) Fix Service Directory & Sudo Permissions"
             echo "  0) Back"
             read -rp "Select option: " c_opt
             case "$c_opt" in
@@ -1472,6 +2100,7 @@ menu_configs() {
                     ;;
                 8)
                     fix_service_dir_permissions
+                    configure_passwordless_sudo
                     ;;
                 0) break ;;
                 *) warn "Invalid option." ;;
@@ -1485,28 +2114,30 @@ menu_logs() {
     echo "  1) Remnanode Container Logs (last 100 lines)"
     echo "  2) Caddy Container Logs (last 100 lines)"
     echo "  3) 3x-ui Container Logs (last 100 lines)"
-    echo "  4) List Maintenance Logs in ${NK_LOG_DIR}"
-    echo "  5) View Latest Maintenance Log"
-    echo "  6) View Latest Diagnostics / Censorcheck Log"
-    echo "  7) View Auto-Update Log"
+    echo "  4) 3x-ui PostgreSQL Container Logs (last 100 lines)"
+    echo "  5) List Maintenance Logs in ${NK_LOG_DIR}"
+    echo "  6) View Latest Maintenance Log"
+    echo "  7) View Latest Diagnostics / Censorcheck Log"
+    echo "  8) View Auto-Update Log"
     echo "  0) Back"
     read -rp "Select option: " l_opt
     case "$l_opt" in
         1) docker logs --tail 100 remnanode 2>&1 || warn "remnanode container not found." ;;
         2) docker logs --tail 100 caddy-remnawave 2>&1 || warn "caddy-remnawave container not found." ;;
         3) docker logs --tail 100 3xui_app 2>&1 || warn "3xui_app container not found." ;;
-        4) ls -lh "$NK_LOG_DIR" 2>/dev/null || info "No logs directory." ;;
-        5)
+        4) docker logs --tail 100 3xui_postgres 2>&1 || warn "3xui_postgres container not found." ;;
+        5) ls -lh "$NK_LOG_DIR" 2>/dev/null || info "No logs directory." ;;
+        6)
             local latest_u
             latest_u=$(ls -t "${NK_LOG_DIR}"/update_*.log 2>/dev/null | head -n1 || true)
             [ -n "$latest_u" ] && cat "$latest_u" || info "No maintenance update logs found."
             ;;
-        6)
+        7)
             local latest_t
             latest_t=$(ls -t "${NK_LOG_DIR}"/tests_*.log 2>/dev/null | head -n1 || true)
             [ -n "$latest_t" ] && cat "$latest_t" || info "No diagnostic test logs found."
             ;;
-        7)
+        8)
             [ -f "$NK_AUTOUPDATE_LOG" ] && tail -n 100 "$NK_AUTOUPDATE_LOG" || info "No auto-update log found."
             ;;
         0) return ;;
@@ -1565,6 +2196,8 @@ Usage:
   nodeKeeper start | stop | restart       Control active stack containers (Remnanode/Caddy or 3x-ui)
   nodeKeeper mode [basic|selfsteal-single|selfsteal-multi|3xui]
                                           Switch installation mode
+  nodeKeeper xui-token                    Generate / rotate 3x-ui API key (token) for Central Panel
+  nodeKeeper xui                          Open native 3x-ui CLI menu inside 3xui_app container
   nodeKeeper schedule [enable|disable|status|refresh|freq <min> <max>|logs <true|false>|extra-cmd "<cmd>"]
                                           Control automated OS & container maintenance schedule
   nodeKeeper update [check|now|enable|disable|status]
@@ -1573,7 +2206,7 @@ Usage:
   nodeKeeper fix-sudo                     Configure passwordless sudo (NOPASSWD) for ADMIN_USER
   nodeKeeper disable                      Stop node services and close proxy/panel ports
   nodeKeeper enable                       Start node services and open proxy/panel ports
-  nodeKeeper logs [remnanode|caddy|3xui|maint|tests|autoupdate]
+  nodeKeeper logs [remnanode|caddy|3xui|postgres|maint|tests|autoupdate]
                                           View logs
   nodeKeeper uninstall [--yes]            Completely remove stack, cron jobs, and configs
 EOF
@@ -1607,6 +2240,15 @@ case "$SUBCMD" in
     disable)         cmd_disable_server ;;
     enable)          cmd_enable_server ;;
     mode)            cmd_switch_mode "${1:-}" ;;
+    xui-token)       cmd_xui_token ;;
+    xui)
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx '3xui_app'; then
+            docker exec -it 3xui_app x-ui
+        else
+            err "3xui_app container is not running."
+            exit 1
+        fi
+        ;;
     fix-permissions) fix_service_dir_permissions ;;
     fix-sudo)        configure_passwordless_sudo ;;
     update)          cmd_update "${1:-now}" "${2:-}" ;;
@@ -1650,6 +2292,7 @@ case "$SUBCMD" in
             remnanode)  docker logs --tail 100 remnanode ;;
             caddy)      docker logs --tail 100 caddy-remnawave ;;
             3xui|xui)   docker logs --tail 100 3xui_app ;;
+            postgres)   docker logs --tail 100 3xui_postgres ;;
             maint)      cat "$(ls -t "${NK_LOG_DIR}"/update_*.log 2>/dev/null | head -n1)" ;;
             tests)      cat "$(ls -t "${NK_LOG_DIR}"/tests_*.log 2>/dev/null | head -n1)" ;;
             autoupdate) [ -f "$NK_AUTOUPDATE_LOG" ] && tail -n 100 "$NK_AUTOUPDATE_LOG" || info "No auto-update log found." ;;
